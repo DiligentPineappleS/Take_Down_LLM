@@ -515,7 +515,6 @@ import random
 import re
 from tqdm import tqdm
 
-# 1. 数据集类定义
 class MathReasoningDataset(Dataset):
     """数学推理数据集，包含问题和参考答案"""
     def __init__(self, data_path, tokenizer, max_length=256):
@@ -530,9 +529,8 @@ class MathReasoningDataset(Dataset):
         processed = []
         for item in raw_data:
             # 构建带格式的提示
-            prompt = f"问题：{item['question']}\n请逐步推理并给出答案，使用以下格式：\n<thinking>\n推理过程\n</thinking>\n<answer>\n最终答案\n</answer>"
             processed.append({
-                'prompt': prompt,
+                'prompt': item["prompt"],
                 'answer': item['answer']
             })
         return processed
@@ -543,7 +541,6 @@ class MathReasoningDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-# 3. 训练配置
 class TrainingConfig:
     def __init__(self):
         self.model_name = "gpt2"  # 基础模型
@@ -562,7 +559,6 @@ class TrainingConfig:
         self.save_dir = Path("checkpoints")  # 模型保存目录
         self.save_dir.mkdir(exist_ok=True)
 
-# 4. 训练函数
 def train():
     # 加载配置
     config = TrainingConfig()
