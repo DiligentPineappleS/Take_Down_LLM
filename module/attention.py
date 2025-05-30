@@ -281,7 +281,7 @@ class MultiLatentAttention(nn.Module):
         
         attention_output = attention_output.transpose(1,2).contiguous().reshape(batch_size,seq_len,-1)# batch_size,seq_len,self.num_heads*self.v_hidden_dim
         output = self.output_net(attention_output)# batch_size,seq_len,hidden_dim
-        return output,attention_output
+        return output,attention_weight
         
 
         
