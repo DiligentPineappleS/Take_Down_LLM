@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+from layernorm import RMSNorm
+from position import get_rotary_pos_emb,RotaryPositionalEncoding
 # 自注意力机制(缩放点积注意力:自注意力基础上加了dropout和掩码填充)
  
 class SelfAttention(nn.Module):
@@ -206,7 +207,100 @@ class GroupAttention(nn.Module):
 
 # MLA 
 class MultiLatentAttention(nn.Module):
+    def __init__(self, hidden_dim,max_length,num_heads,q_lora_rank,q_head_dim,kv_lora_rank,q_rope_dim,v_hidden_dim,num_kv_head,eps = 1e-20,dropout_rate = None):
+        super(MultiQueryAttention).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        assert hidden_dim%num_heads==0, "d_model 必须被num_heads整除"
+        assert num_heads%num_kv_head==0, "num_heads 必须被num_groups整除"
+        self.num_kv_head = num_kv_head
+        self.num_groups = hidden_dim//self.num_kv_head
+        self.max_length = max_length
+        
+        self.eps = eps
+        self.dropout_rate = dropout_rate
+        
+        self.q_lora_rank = q_lora_rank
+        self.q_head_dim = q_head_dim
+        self.q_rope_dim = q_rope_dim
+        self.q_nrope_dim = q_head_dim - q_rope_dim
+        self.kv_lora_rank = kv_lora_rank
+        self.v_hidden_dim = v_hidden_dim
+        self.q_lora_a_net = nn.Linear(self.hidden_dim,self.q_lora_rank,bias=True)
+        self.q_lora_rmsnorm = RMSNorm(self.q_lora_rank,self.eps)
+        self.q_lora_b_net = nn.Linear(self.q_lora_rank,self.num_heads*self.q_head_dim)
+
+        self.kv_lora_a_net = nn.Linear(self.hidden_dim,self.kv_lora_rank+self.q_rope_dim,bias=True)
+        self.kv_lora_rmsnorm = RMSNorm(self.kv_lora_rank,self.eps)
+        self.kv_lora_b_net = nn.Linear(self.kv_lora_rank,self.num_kv_head*(self.q_nrope_dim+self.v_hidden_dim))
+
+        self.output_net = nn.Linear(self.num_heads*self.v_hidden_dim,self.hidden_dim,bias=True)
+        self.emb_positon = RotaryPositionalEncoding(self.hidden_dim,max_len=max_length,base=10000)
+        if dropout_rate:
+            self.dropout_net = nn.Dropout(dropout_rate)
+
+
+    def forward(self,hidden_states:torch.Tensor,attention_mask):
+        batch_size,seq_len = hidden_states.shape
+        q_lora_a = self.q_lora_a_net(hidden_states)
+        q_lora_norm = self.q_lora_rmsnorm(q_lora_a)
+        q_lora_b = self.q_lora_a_net(q_lora_norm)
+        q_lora_b = q_lora_b.view(batch_size,seq_len,-1, self.q_head_dim).transpose(1,2)
+
+        q_nrope,q_rope = torch.split(q_lora_b,[self.q_nrope_dim,self.q_rope_dim],dim=-1)
+
+        k_lora_a = self.kv_lora_a_net(hidden_states)
+
+        k_lora_a,kv_rope = torch.split(k_lora_a,[self.kv_lora_rank,self.q_rope_dim],dim=-1)
+        k_lora_norm = self.kv_lora_rmsnorm(k_lora_a)
+        kv_lora_b = self.kv_lora_b_net(k_lora_norm)
+        kv_lora_b = kv_lora_b.view(batch_size,seq_len,-1,self.q_nrope_dim+self.v_hidden_dim).transpose(1,2)
+        k_nrope,value_states = torch.split(kv_lora_b,[self.q_nrope_dim,self.v_hidden_dim],dim=-1)
+        
+        sins, cos = self.emb_positon(kv_rope,self.max_length)
+        kv_rope = kv_rope.view(batch_size,1,seq_len,self.q_rope_dim)
+        kv_rope_emb = get_rotary_pos_emb(kv_rope,sins, cos)
+        q_rope_emb = get_rotary_pos_emb(q_rope,sins, cos)
+        
+        kv_rope_emb = kv_rope_emb.expand(batch_size,seq_len,self.num_kv_head,-1)
+        key_states = torch.cat([kv_rope_emb,k_nrope])
+        key_states = key_states.unsqueeze(2).expand(batch_size,self.num_kv_head,self.num_groups,seq_len,-1).reshape(batch_size,self.num_heads,seq_len,-1)
+        value_states = value_states.unsqueeze(2).expand(batch_size,self.num_kv_head,self.num_groups,seq_len,-1).reshape(batch_size,self.num_heads,seq_len,-1)
+
+        query_states = torch.cat([q_rope_emb,k_nrope])
+
+        # q_rope:[batch_size,num_heads,seq_len,q_head_dim] *[batch_size,num_heads,q_head_dim,seq_len] ---> [batch_size,num_heads,seq_len,seq_len] 
+        attention_score = torch.matmul(query_states,key_states.transpose(-1,-2))/torch.sqrt(self.q_head_dim)
+        if attention_mask:
+            attention_score = attention_score.masked_fill(attention_mask==0,float("-inf"))
+        attention_weight = F.softmax(attention_score,dim=-1)
+        if self.dropout_rate:
+            attention_weight = self.dropout_net(attention_weight)
+        # [batch_size,num_heads,seq_len,seq_len] *[batch_size,num_heads,seq_len,v_head_dim] ---> [batch_size,num_heads,seq_len,v_head_dim] 
+        attention_output = torch.matmul(attention_weight,value_states)
+        
+        attention_output = attention_output.transpose(1,2).contiguous().reshape(batch_size,seq_len,-1)# batch_size,seq_len,self.num_heads*self.v_hidden_dim
+        output = self.output_net(attention_output)# batch_size,seq_len,hidden_dim
+        return output,attention_output
+        
+
+        
+
+
+        
+
+
+        
+
+
+
+
+
+
+        
     
+
+
 
 
 

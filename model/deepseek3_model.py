@@ -111,7 +111,7 @@ class Deepseek3Attention(nn.Module):
         self.mscale_dim = mscale_dim
 
 
-    def forward(self,hidden_states:torch.Tensor,attention_mask,rotaryemb):
+    def forward(self,hidden_states:torch.Tensor,attention_mask):
         batch_size,seq_len,hidden_dim = hidden_states.shape
         # query将高维特征压缩为低秩特征， [batch_zise,seq_len,hidden_dim]---->[batch_zise,seq_len,q_lora_rank]
         Query_lora_a_states = self.query_lora_a_proj(hidden_states)  
@@ -164,7 +164,7 @@ class Deepseek3Attention(nn.Module):
         Value_states = Value_states.unsqueeze(2).expand(-1,-1,self.num_kv_groups,-1,-1).reshape(batch_size,self.num_kv_heads*self.num_kv_groups,seq_len,-1)
 
         # 注意力分数
-        ## [batch_zise,num_head,seq_len,qk_nrope_head_dim+qk_rope_head_dim]*[batch_zise,num_kv_heads*num_kv_groups,seq_len,qk_nrope_head_dim+qk_rope_head_dim]-->[batch_zise,num_head,seq_len,seq_len]
+        ## [batch_zise,num_head,seq_len,qk_nrope_head_dim+qk_rope_head_dim]*[batch_zise,num_kv_heads*num_kv_groups,qk_nrope_head_dim+qk_rope_head_dim,seq_len]-->[batch_zise,num_head,seq_len,seq_len]
         attention_score = torch.matmul(Query_states,Key_states.transpose(-1,-2))
         scale = 1/math.sqrt(self.query_head_dim) 
         if self.mscale_dim:
@@ -172,10 +172,8 @@ class Deepseek3Attention(nn.Module):
                 mscale = 1
             else:
                 mscale = 0.1*self.mscale_dim * math.log(self.scaling_factor) + 1.0
-            scale = scale*mscale*mscale
-            attention_score = attention_score
-        else:
-            attention_score = attention_score/math.sqrt(self.query_head_dim)  # query_head_dim = qk_nrope_head_dim+qk_rope_head_dim
+            scale = scale*mscale*mscale        
+        attention_score = attention_score*scale  # query_head_dim = qk_nrope_head_dim+qk_rope_head_dim
         if attention_mask:
             attention_score = attention_score.masked_fill(attention_mask==0,float("-inf"))
         attention_weight = F.softmax(attention_score,dim=-1)

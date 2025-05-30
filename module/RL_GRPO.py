@@ -603,7 +603,7 @@ def train():
             answers = batch['answer']
             
             # 生成响应并计算损失
-            loss = model.train_step(prompts, answers)
+            loss = model.train(prompts, answers)
             total_loss += loss.item()
         
         avg_loss = total_loss / len(train_loader)
