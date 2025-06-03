@@ -205,7 +205,6 @@ class PPOTrainer:
 
     def _text_coherence(self, text):
         """模拟文本连贯性评分"""
-        # 实际应用中用NLP模型替代
         if len(text) < 20:
             return 0.3
         if "however" in text or "therefore" in text or "furthermore" in text:
@@ -214,14 +213,12 @@ class PPOTrainer:
 
     def _query_relevance(self, text, query):
         """模拟查询相关性评分"""
-        # 实际应用中用相似度模型替代
         if len(query) > 0 and any(word in text for word in query.split()[:3]):
             return 0.8
         return 0.6
 
     def _engagement_score(self, text):
         """模拟用户参与度评分"""
-        # 实际应用中用情感模型替代
         if "!" in text or "?" in text or ("amazing" in text or "important" in text):
             return 0.9
         return 0.65
