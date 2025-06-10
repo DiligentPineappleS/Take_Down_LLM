@@ -8,20 +8,22 @@ import json
 import argparse
 import os
 
-parse = argparse.ArgumentParser()
-parse.add_argument("--model_name",type=str,default="qwen/qwen2.0-7B",help="模型名称")
-parse.add_argument("--datapath",type=str,default="./",help="训练数据的路径")
-parse.add_argument("--lora_rank",type=int,default=8,help="lora秩")
-parse.add_argument("--alpha",type=int,default=32,help="lora缩放因子")
-parse.add_argument("--target_modules",type=list,default=["q_proj","v_proj"],help="lora微调的应用模块")
-parse.add_argument("--lr",type=float,default=1e-5,help="学习率")
-parse.add_argument("--batch_size",type=int,default=32,help="模型训练批大小")
-parse.add_argument("--epoches",type=int,default=10,help="训练的轮数")
-parse.add_argument("--save_dir",type=str,default="./save_model",help="模型保存路径")
-parse.add_argument("--max_len",type=int,default=1024,help="序列最大长度")
-parse.add_argument("--warmup",type=int,default=1024,help="序列最大长度")
-parse.add_argument("--max_grad_norm",type=float,default=1,help="序列最大长度")
-parse.add_argument("--seed",type=int,default=64,help="序列最大长度")
+def parse_args():
+    parse = argparse.ArgumentParser()
+    parse.add_argument("--model_name",type=str,default="qwen/qwen2.0-7B",help="模型名称")
+    parse.add_argument("--datapath",type=str,default="./",help="训练数据的路径")
+    parse.add_argument("--lora_rank",type=int,default=8,help="lora秩")
+    parse.add_argument("--alpha",type=int,default=32,help="lora缩放因子")
+    parse.add_argument("--target_modules",type=list,default=["q_proj","v_proj"],help="lora微调的应用模块")
+    parse.add_argument("--lr",type=float,default=1e-5,help="学习率")
+    parse.add_argument("--batch_size",type=int,default=32,help="模型训练批大小")
+    parse.add_argument("--epoches",type=int,default=10,help="训练的轮数")
+    parse.add_argument("--save_dir",type=str,default="./save_model",help="模型保存路径")
+    parse.add_argument("--max_len",type=int,default=1024,help="序列最大长度")
+    parse.add_argument("--warmup",type=int,default=1024,help="序列最大长度")
+    parse.add_argument("--max_grad_norm",type=float,default=1,help="序列最大长度")
+    parse.add_argument("--seed",type=int,default=64,help="序列最大长度")
+    return parse
 
 
 
@@ -242,7 +244,6 @@ def train_epoch(model, tokenizer, train_loader, optimizer, scheduler, device, ep
 def main():
     """主训练函数"""
     args = parse_args()
-    set_seed()
     
     # 设备设置
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -254,64 +255,39 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     
     # 加载模型
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, 
-        trust_remote_code=True,
-        torch_dtype=torch.float16 if device.type == 'cuda' else torch.float32
-    ).to(device)
-    
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, trust_remote_code=True,torch_dtype=torch.float16 if device.type == 'cuda' else torch.float32).to(device)
+
     # 应用LoRA
     print("Applying LoRA...")
-    lora_model = LoRAModelWrapper(
-        model, 
-        args.target_modules, 
-        args.lora_rank, 
-        args.alpha
-    ).to(device)
+    lora_model = Lora(model, args.target_modules, args.lora_rank, args.alpha).to(device)
     
     # 准备数据集
     print("Loading dataset...")
     train_dataset = TextDataset(tokenizer, args.dataset_path, args.max_seq_length)
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     
     # 优化器（只优化LoRA参数）
     params_to_optimize = []
     for module in lora_model.lora_modules.values():
         params_to_optimize += list(module.parameters())
     
-    optimizer = AdamW(params_to_optimize, lr=args.learning_rate)
+    optimizer =torch.optim.AdamW(params_to_optimize, lr=args.lr)
     
     # 学习率调度器
-    total_steps = len(train_loader) * args.num_epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=int(0.1 * total_steps),
-        num_training_steps=total_steps
-    )
+    total_steps = len(train_loader) * args.epoches
+    scheduler = get_linear_schedule_with_warmup(optimizer,num_warmup_steps=int(0.1 * total_steps),num_training_steps=total_steps)
     
     # 创建保存目录
     os.makedirs(args.save_dir, exist_ok=True)
     
     # 训练循环
     print("Starting training...")
-    for epoch in range(args.num_epochs):
-        avg_loss = train_epoch(
-            lora_model, 
-            tokenizer, 
-            train_loader, 
-            optimizer, 
-            scheduler, 
-            device, 
-            epoch
-        )
+    for epoch in range(args.epoches):
+        avg_loss = train_epoch(lora_model, tokenizer, train_loader, optimizer, scheduler, device, epoch)
         
         # 保存检查点
         epoch_dir = os.path.join(args.save_dir, f"epoch_{epoch+1}")
-        lora_model.save_lora_weights(epoch_dir)
+        lora_model.save_lora(epoch_dir)
         
         # 简单测试
         test_input = "用户：深度学习的核心概念是什么？"
@@ -327,8 +303,8 @@ def main():
     final_lora_dir = os.path.join(args.save_dir, "final_lora")
     final_merged_dir = os.path.join(args.save_dir, "final_merged_model")
     
-    lora_model.save_lora_weights(final_lora_dir)
-    lora_model.merge_and_save(final_merged_dir)
+    lora_model.save_lora(final_lora_dir)
+    lora_model.save_merge_model(final_merged_dir)
     
     print(f"\nTraining complete! Models saved at {args.save_dir}")
     
