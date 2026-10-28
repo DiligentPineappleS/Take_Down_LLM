@@ -4,8 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from layernorm import RMSNorm
-from position import get_rotary_pos_emb,RotaryPositionalEncoding
-# 自注意力机制(缩放点积注意力:自注意力基础上加了dropout和掩码填充)
+from position import RotaryPositionalEncoding, get_rotary_pos_emb
+
  
 class SelfAttention(nn.Module):
     def __init__(self,d_model,dropout_rate=None):
@@ -25,7 +25,7 @@ class SelfAttention(nn.Module):
         attention_value= torch.matmul(Query,Key.transpose(-1,-2)) # 交换key的最后两个维度，使其变换为[batch_size, d_model, seq_len]；输出：[batch_size, seq_len, seq_len]
         attention_score = attention_value/math.sqrt(self.d_model) 
 
-        if attention_mask:
+        if attention_mask is not None:
             # 掩码矩阵attention_mask和注意力分数矩阵的形状是完全一致的
             attention_score = attention_score.masked_fill(attention_mask==0,float("-1e20")) # 将 attention_score 中所有与 attention_mask == 0 对应的位置替换为一个极小的负值（-1e20，为了确保在 softmax中这些位置的权重趋近于 0）
         attention_weight = F.softmax(attention_score,dim=-1) 
@@ -39,7 +39,7 @@ class SelfAttention(nn.Module):
 ## 原理：通过将输入分成多个独立的头，并行计算注意力，每个头学习不同的上下文关系
 class MultiheadAttention(nn.Module):
     def __init__(self, d_model,num_heads,dropout_rate = None):
-        super(MultiheadAttention).__init__()
+        super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         assert d_model%num_heads==0, "d_model 必须被num_heads整除"
@@ -69,14 +69,12 @@ class MultiheadAttention(nn.Module):
         Key = Key.transpose(1,2) #[batch_size, num_heads, seq_len, head_dim]
         Value = Value.transpose(1,2) 
         Query = Query.transpose(1,2)
-
         # 计算每个词和其他词的相似度：每个员工根据编码的来找到数字和数字之间的关系；
-        attention_value= torch.matmul(Query,Key.transpose(-1,-2)) # 交换key的最后两个维度，使其变换为[batch_size, d_model, seq_len]；输出：[batch_size, seq_len, seq_len]
+        attention_value= torch.matmul(Query,Key.transpose(-1,-2)) # [batch, num_heads, seq_len, head_dim] x [batch, num_heads, head_dim, seq_len] -> [batch, num_heads, seq_len, seq_len]
         # 对相似度进行缩放，点积的值可能会很大，因为我们计算点积的维度是self.dim，所以采用sqrt(self.dim)进行缩放
         # 这里选择sqrt(self.dim)，因为点积的方差为self.dim，标准差是sqrt(self.dim)
         attention_score = attention_value/math.sqrt(self.dim)  # [batch, num_heads, seq_len, seq_len]
-
-        if attention_mask:
+        if attention_mask is not None:
             # 掩码矩阵attention_mask和注意力分数矩阵的形状是完全一致的
             attention_score = attention_score.masked_fill(attention_mask==0,float("-1e20")) # 将 attention_score 中所有与 attention_mask == 0 对应的位置替换为一个极小的负值（-1e20，为了确保在 softmax中这些位置的权重趋近于 0）
         # 计算注意力权重，采用softmax将计算的每个词和其他词相似度（注意力分数）转化为注意力概率；
@@ -99,7 +97,7 @@ class MultiheadAttention(nn.Module):
 ## 原理：基于多头注意力，采用共享K，V矩阵的方式来计算     
 class MultiQueryAttention(nn.Module):
     def __init__(self, d_model,num_heads,dropout_rate = None):
-        super(MultiQueryAttention).__init__()
+        super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         assert d_model%num_heads==0, "d_model 必须被num_heads整除"
@@ -127,17 +125,15 @@ class MultiQueryAttention(nn.Module):
         attention_score = torch.matmul(Query,Key.transpose(-1,-2))
         attention_score = attention_score/math.sqrt(self.dim)  # [batch_size,num_heads, seq_len,seq_len]
 
-        if attention_mask:
+        if attention_mask is not None:
             attention_score = attention_score.masked_fill(attention_mask==0,float("-inf"))
         
-        attention_weight = F.softmax(attention_score)  # [batch_size,num_heads, seq_len,seq_len]
+        attention_weight = F.softmax(attention_score,dim=-1)  # [batch_size,num_heads, seq_len,seq_len]
+        if self.dropout_rate:
+            attention_weight = self.dropout(attention_weight)
 
         attention_output = torch.matmul(attention_weight,Value)  # [batch_size,num_heads, seq_len,head_dim]
-        if self.dropout_rate:
-            attention_output = self.dropout(attention_output)
-
-
-        attention_output = attention_output.transpose(1,2).contiguous().view(-1,-1,self.d_model)
+        attention_output = attention_output.transpose(1,2).contiguous().view(batch_size,-1,self.d_model)
 
         attention_output = self.Output(attention_output)
 
@@ -146,7 +142,7 @@ class MultiQueryAttention(nn.Module):
 # 分组查询注意力
 class GroupAttention(nn.Module):
     def __init__(self, d_model,num_heads,num_groups,dropout_rate = None):
-        super(MultiQueryAttention).__init__()
+        super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         assert d_model%num_heads==0, "d_model 必须被num_heads整除"
@@ -188,7 +184,7 @@ class GroupAttention(nn.Module):
         ## [batch_size, num_head,seq_len, dim] * [batch_size,num_head,dim,seq_len] = [batch_size, num_head, seq_len, seq_len ]
         attention_score = torch.matmul(Query,Key.transpose(-1,-2))/math.sqrt(self.dim)
         # 掩码
-        if attention_mask :
+        if attention_mask is not None :
             attention_score = attention_score.masked_fill(attention_mask==0,float("-inf"))
         
         # 计算权重
@@ -209,13 +205,14 @@ class GroupAttention(nn.Module):
 ## 下面的代码MLA是完全是为了完善代码体系手搓的，时间比较赶，在位置编码部分简化部分代码，不影响MLA的主要逻辑     
 class MultiLatentAttention(nn.Module):
     def __init__(self, hidden_dim,max_length,num_heads,q_lora_rank,q_head_dim,kv_lora_rank,q_rope_dim,v_hidden_dim,num_kv_head,eps = 1e-20,dropout_rate = None):
-        super(MultiQueryAttention).__init__()
+        super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        assert hidden_dim%num_heads==0, "d_model 必须被num_heads整除"
-        assert num_heads%num_kv_head==0, "num_heads 必须被num_groups整除"
+        assert num_heads%num_kv_head==0, "num_heads 必须被 num_kv_head 整除"
+        assert 0 < q_rope_dim <= q_head_dim, "q_rope_dim 必须大于 0 且不超过 q_head_dim"
+        assert q_rope_dim % 2 == 0, "q_rope_dim 必须是偶数"
         self.num_kv_head = num_kv_head
-        self.num_groups = hidden_dim//self.num_kv_head
+        self.num_groups = num_heads // num_kv_head
         self.max_length = max_length
         
         self.eps = eps
@@ -242,11 +239,11 @@ class MultiLatentAttention(nn.Module):
 
 
     def forward(self,hidden_states:torch.Tensor,attention_mask):
-        batch_size,seq_len = hidden_states.shape
+        batch_size,seq_len,_ = hidden_states.shape
         q_lora_a = self.q_lora_a_net(hidden_states)
         q_lora_norm = self.q_lora_rmsnorm(q_lora_a)
-        q_lora_b = self.q_lora_a_net(q_lora_norm)
-        q_lora_b = q_lora_b.view(batch_size,seq_len,-1, self.q_head_dim).transpose(1,2)
+        q_lora_b = self.q_lora_b_net(q_lora_norm)
+        q_lora_b = q_lora_b.view(batch_size,seq_len,self.num_heads, self.q_head_dim).transpose(1,2)
 
         q_nrope,q_rope = torch.split(q_lora_b,[self.q_nrope_dim,self.q_rope_dim],dim=-1)
 
@@ -255,7 +252,7 @@ class MultiLatentAttention(nn.Module):
         k_lora_a,kv_rope = torch.split(k_lora_a,[self.kv_lora_rank,self.q_rope_dim],dim=-1)
         k_lora_norm = self.kv_lora_rmsnorm(k_lora_a)
         kv_lora_b = self.kv_lora_b_net(k_lora_norm)
-        kv_lora_b = kv_lora_b.view(batch_size,seq_len,-1,self.q_nrope_dim+self.v_hidden_dim).transpose(1,2)
+        kv_lora_b = kv_lora_b.view(batch_size,seq_len,self.num_kv_head,self.q_nrope_dim+self.v_hidden_dim).transpose(1,2)
         k_nrope,value_states = torch.split(kv_lora_b,[self.q_nrope_dim,self.v_hidden_dim],dim=-1)
         
         sins, cos = self.emb_positon(kv_rope,self.max_length)
@@ -263,16 +260,16 @@ class MultiLatentAttention(nn.Module):
         kv_rope_emb = get_rotary_pos_emb(kv_rope,sins, cos)
         q_rope_emb = get_rotary_pos_emb(q_rope,sins, cos)
         
-        kv_rope_emb = kv_rope_emb.expand(batch_size,seq_len,self.num_kv_head,-1)
-        key_states = torch.cat([kv_rope_emb,k_nrope])
+        kv_rope_emb = kv_rope_emb.expand(batch_size,self.num_kv_head,seq_len,-1)
+        key_states = torch.cat([k_nrope, kv_rope_emb], dim=-1)
         key_states = key_states.unsqueeze(2).expand(batch_size,self.num_kv_head,self.num_groups,seq_len,-1).reshape(batch_size,self.num_heads,seq_len,-1)
         value_states = value_states.unsqueeze(2).expand(batch_size,self.num_kv_head,self.num_groups,seq_len,-1).reshape(batch_size,self.num_heads,seq_len,-1)
 
-        query_states = torch.cat([q_rope_emb,k_nrope])
+        query_states = torch.cat([q_nrope, q_rope_emb], dim=-1)
 
-        # q_rope:[batch_size,num_heads,seq_len,q_head_dim] *[batch_size,num_heads,q_head_dim,seq_len] ---> [batch_size,num_heads,seq_len,seq_len] 
-        attention_score = torch.matmul(query_states,key_states.transpose(-1,-2))/torch.sqrt(self.q_head_dim)
-        if attention_mask:
+        # [batch, num_heads, seq, q_head_dim] x [batch, num_heads, q_head_dim, seq] -> [batch, num_heads, seq, seq]
+        attention_score = torch.matmul(query_states,key_states.transpose(-1,-2))/math.sqrt(self.q_head_dim)
+        if attention_mask is not None:
             attention_score = attention_score.masked_fill(attention_mask==0,float("-inf"))
         attention_weight = F.softmax(attention_score,dim=-1)
         if self.dropout_rate:
@@ -309,6 +306,8 @@ class MLA(nn.Module):
         self.qk_rope_head_dim = qk_rope_head_dim
         ## Query 非旋转编码维度
         self.qk_nrope_head_dim = qk_nrope_head_dim ##self.qk_nrope_head_dim = qk_nrope_head_dim ==self.query_head_dim - self.qk_rope_head_dim
+        assert self.query_head_dim == self.qk_nrope_head_dim + self.qk_rope_head_dim, "query_head_dim 必须等于 qk_nrope_head_dim + qk_rope_head_dim"
+        assert self.qk_rope_head_dim % 2 == 0, "qk_rope_head_dim 必须是偶数"
         # key/value  lora低秩分解维度
         self.kv_lora_rank = kv_lora_rank
 
@@ -394,13 +393,14 @@ class MLA(nn.Module):
         attention_score = torch.matmul(Query_states,Key_states.transpose(-1,-2))
         scale = 1/math.sqrt(self.query_head_dim) 
         if self.mscale_dim:
-            if scale<=1:
+            # scaling_factor 是 RoPE 长度延伸倍数，大于 1 时才乘 YaRN 的 mscale
+            if self.scaling_factor<=1:
                 mscale = 1
             else:
                 mscale = 0.1*self.mscale_dim * math.log(self.scaling_factor) + 1.0
             scale = scale*mscale*mscale        
         attention_score = attention_score*scale  # query_head_dim = qk_nrope_head_dim+qk_rope_head_dim
-        if attention_mask:
+        if attention_mask is not None:
             attention_score = attention_score.masked_fill(attention_mask==0,float("-inf"))
         attention_weight = F.softmax(attention_score,dim=-1)
         if self.dropout_rate:

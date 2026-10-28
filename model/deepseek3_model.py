@@ -56,6 +56,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.gamma = torch.ones(self.hidden_dim)
     def forward(self,x:torch.Tensor):
+        # x.pow(2).mean(-1,keepdim = True) 计算x的平方的平均值，keepdim = True 保持维度不变
+        # torch.rsqrt(x.pow(2).mean(-1,keepdim = True)+self.eps) 计算x的平方的平均值的平方根的倒数
+        # self.gamma*x_.type_as(x) 将x_乘以self.gamma，并转换为x的类型
         x_ = x*torch.rsqrt(x.pow(2).mean(-1,keepdim = True)+self.eps)
         return self.gamma*x_.type_as(x)
     
@@ -64,6 +67,7 @@ class Deepseek3Attention(nn.Module):
                  qk_rope_head_dim,qk_nrope_head_dim,keyvalue_head_dim,attention_bias,scaling_factor,is_rope_interleave,mscale_dim,dropout_rate=None,eps=1e-6,base=10000):
         super(Deepseek3Attention,self).__init__()
         assert num_heads%num_kv_heads == 0 ,"num_heads must be num_groups*num_kv_heads,num_kv_heads is int"
+        # 定义模型参数
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -82,18 +86,21 @@ class Deepseek3Attention(nn.Module):
         self.qk_nrope_head_dim = qk_nrope_head_dim ##self.qk_nrope_head_dim = qk_nrope_head_dim ==self.query_head_dim - self.qk_rope_head_dim
         # key/value  lora低秩分解维度
         self.kv_lora_rank = kv_lora_rank
-
+        
+        # 最大长度
         self.max_len = max_len
         self.dropout_rate = dropout_rate
+
         self.base = base
+
         self.attention_bias = attention_bias
         self.eps = eps
-        # query Latent
+        # query Latent 线性层
         self.query_lora_a_proj = nn.Linear(self.hidden_dim,self.q_lora_rank,bias=self.attention_bias )
         self.query_lora_layernorm = RMSNorm(self.q_lora_rank,self.eps)
         self.query_lora_b_proj = nn.Linear(self.q_lora_rank,self.num_heads*self.query_head_dim ,bias=False)
         # key/value  Latent
-        ## kv_a_layernorm: (b,s,r_kv) -> (b,s,r_kv)
+        ## kv_a_layernorm: (b,s,r_kv) -> (b,s,r_kv) 归一化
         ## kv_b_proj: (b,s,r_kv) -> (b,s,n_head*(d_nope+d_v))
         ## view+transpose: (b,s,n_head,d_nope+d_v) -> (b,n_head,s,d_nope+d_v)
         self.key_value_lora_a_proj = nn.Linear(self.hidden_dim,self.kv_lora_rank+self.qk_rope_head_dim,bias = self.attention_bias)
@@ -242,14 +249,16 @@ class DeepseekV3TopkRouter(nn.Module):
         scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(),0.0)
         topk_index = torch.topk(scores_for_choice,k = self.topk,dim=-1,sorted=False)[1]
         return topk_index
+    
+    
     def forward(self,hidden_states):
         ### 整体流程：1. 选择路由；2. 计算路由分数；3.路由分数分组；4.每组提取topk2的分数求和；5.提取分数前group_topk的组；6.
         # 合并；[batch_size,seq_len,hidden_dim]--->[batch_size*seq_len,hidden_dim]
-        hidden_states = hidden_states.view(-1,self.hidden_dim)
+        hidden_states = hidden_states.view(-1,self.hidden_dim)  # 将hidden_states展平
         # 计算路由[batch_size*seq_len,hidden_dim]--->[batch_size*seq_len,num_router_expert]
-        router_logits = self.router_weight(hidden_states.type(torch.float32))
+        router_logits = self.router_weight(hidden_states.type(torch.float32))  # 将hidden_states转换为float32类型，并计算路由,router_logits: [batch_size*seq_len,num_router_expert]
         # 计算分数 [batch_size*seq_len,num_router_expert]
-        router_score = F.sigmoid(router_logits)
+        router_score = F.sigmoid(router_logits)  # 将路由分数转换为sigmoid函数
         # topk专家提取 [batch_size*seq_len,num_router_expert]-->[batch_size*seq_len,num_group,num_router_expert]
         ## 专家分组,将专家分组成[num_group, experts_per_group]，取每组前2名得分求和
         group_score = router_score.view(-1,self.num_group,self.num_router_expert/self.num_group)
